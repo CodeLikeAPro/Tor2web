@@ -225,6 +225,9 @@ class Tor2webObj(object):
         # The destination hidden service identifier
         self.onion = None
 
+        # Is Tor or I2p site
+        self.hs_type = None
+
         # The path portion of the URI
         self.path = None
 
@@ -692,6 +695,8 @@ class T2WRequest(http.Request):
         self.obj.address = self.obj.host_tor + self.obj.uri
         self.obj.client_proto = 'http://' if config.transport == 'HTTP' else 'https://'
         self.obj.host_tor2web = self.obj.client_proto + self.obj.onion[:-len("onion")] + config.basehost + self.port
+        if self.obj.hs_type == "i2p":
+            self.obj.host_tor2web = self.obj.client_proto + self.obj.onion[:-len("i2p")] + config.basehost + self.port    
 
         self.obj.headers = req.headers
 
@@ -713,6 +718,9 @@ class T2WRequest(http.Request):
         request.headers = self.requestHeaders
         request.host = self.getRequestHostname()
         request.uri = self.uri
+
+        # hs_type
+        rpc_log("request.host: " + request.host)
 
         content_length = self.getHeader(b'content-length')
         transfer_encoding = self.getHeader(b'transfer-encoding')
@@ -937,15 +945,24 @@ class T2WRequest(http.Request):
             # the requested resource is remote, we act as proxy
             if config.mode == 'TRANSLATION' and request.host in hosts_map:
                 self.obj.onion = hosts_map[request.host]
+                self.obj.hs_type = "tor"
             else:
-                self.obj.onion = request.host.split("." + config.basehost)[0].split(".")[-1] + ".onion"
+                host_suffix = request.host.split("." + config.basehost)[0].split(".")[-1]
+                if re.search('[a-zA-Z2-7]{16}', host_suffix) == None:
+                    self.obj.onion = host_suffix + ".i2p"
+                    self.obj.hs_type = "i2p"
+                else:
+                    self.obj.onion = host_suffix + ".onion"
+                    self.obj.hs_type = "tor"
 
-            if not request.host or not verify_onion(self.obj.onion):
+            rpc_log("Hidden service type: " + self.obj.hs_type)
+
+            if self.obj.hs_type == "tor" and (not request.host or not verify_onion(self.obj.onion)):
                 self.sendError(406, 'error_invalid_hostname.tpl')
                 defer.returnValue(NOT_DONE_YET)
 
             # if the user is using tor redirect directly to the hidden service
-            if client_uses_tor:
+            if self.obj.hs_type == "tor" and client_uses_tor:
                 if not config.disable_tor_redirection:
                     self.redirect("http://" + self.obj.onion + request.uri)
                     self.finish()
@@ -963,8 +980,11 @@ class T2WRequest(http.Request):
             parsed = urlsplit(self.obj.address)
 
             self.var['address'] = self.obj.address
-            self.var['onion'] = self.obj.onion.replace(".onion", "")
             self.var['path'] = parsed[2]
+            if self.obj.hs_type == "tor":
+                self.var['onion'] = self.obj.onion.replace(".onion", "")
+            elif self.obj.hs_type == "i2p":
+                self.var['onion'] = self.obj.onion.replace(".i2p", "")
 
             # Variations of the URL for testing against the blocklist
             full_path = self.obj.onion + self.var['path']
@@ -992,7 +1012,7 @@ class T2WRequest(http.Request):
 
             if config.mode != "TRANSLATION":
                 rpc_log("detected <onion_url>.tor2web Hostname: %s" % self.obj.onion)
-                if not verify_onion(self.obj.onion):
+                if self.obj.hs_type == "tor" and not verify_onion(self.obj.onion):
                     self.sendError(406, 'error_invalid_hostname.tpl')
                     defer.returnValue(NOT_DONE_YET)
 
